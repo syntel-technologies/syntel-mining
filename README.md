@@ -1,0 +1,1 @@
+# syntel-mining
