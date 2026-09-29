@@ -41,6 +41,8 @@ class Net:
     places: int = 0
     initial: Marking = frozenset()
     final: Marking = frozenset()
+    #: The cost of the model's shortest run (the empty trace's alignment), computed once per net.
+    shortest: int | None = None
 
     def place(self) -> int:
         self.places += 1
@@ -115,9 +117,11 @@ def _fire(marking: Marking, t: Transition) -> Marking | None:
     return (marking - t.consumes) | t.produces
 
 
-def _search(
-    net: Net, trace: Sequence[str], max_states: int
-) -> tuple[int, tuple[tuple[str | None, str | None], ...]] | None:
+Moves = tuple[tuple[str | None, str | None], ...]
+
+
+def _search(net: Net, trace: Sequence[str], max_states: int) -> tuple[tuple[int, Moves] | None, int]:
+    """The cheapest path to the final marking with the whole trace consumed, and how many states it took."""
     tie = count()
     start = (net.initial, 0)
     frontier: list[tuple[int, int, int, Marking, int, tuple[tuple[str | None, str | None], ...]]] = [
@@ -130,10 +134,10 @@ def _search(
         if best.get((marking, i), cost) < cost:
             continue
         if marking == net.final and i == len(trace):
-            return cost, moves
+            return (cost, moves), explored
         explored += 1
         if explored > max_states:
-            return None
+            return None, explored
 
         def push(
             new_cost: int,
@@ -162,20 +166,27 @@ def _search(
                 if i < len(trace) and trace[i] == t.label:
                     push(cost, after, i + 1, (t.label, t.label))
                 push(cost + 1, after, i, (None, t.label))
-    return None
+    return None, explored
+
+
+def align_within(tree: Tree | Net, trace: Sequence[str], *, max_states: int = 200_000) -> tuple[Alignment | None, int]:
+    """An optimal alignment, or None past `max_states`, with the states the search explored: a caller aligning
+    many traces spends one budget across them and stops when it is gone, the same way on every machine."""
+    net = tree if isinstance(tree, Net) else to_net(tree)
+    found, explored = _search(net, trace, max_states)
+    if found is None:
+        return None, explored
+    if net.shortest is None:
+        empty, _ = _search(net, (), max_states)
+        net.shortest = empty[0] if empty is not None else 0
+    cost, moves = found
+    worst = len(trace) + net.shortest
+    return Alignment(cost=cost, moves=moves, fitness=1.0 if worst == 0 else 1 - cost / worst), explored
 
 
 def align(tree: Tree | Net, trace: Sequence[str], *, max_states: int = 200_000) -> Alignment | None:
     """An optimal alignment of the trace against the model, or None when the search passed `max_states`."""
-    net = tree if isinstance(tree, Net) else to_net(tree)
-    found = _search(net, trace, max_states)
-    if found is None:
-        return None
-    empty = _search(net, (), max_states)
-    shortest = empty[0] if empty is not None else 0
-    cost, moves = found
-    worst = len(trace) + shortest
-    return Alignment(cost=cost, moves=moves, fitness=1.0 if worst == 0 else 1 - cost / worst)
+    return align_within(tree, trace, max_states=max_states)[0]
 
 
 @dataclass(frozen=True)
@@ -220,4 +231,4 @@ def conformance(tree: Tree, log: Mapping[tuple[str, ...], int] | Iterable[Sequen
     )
 
 
-__all__ = ["Alignment", "Conformance", "Net", "align", "conformance", "to_net"]
+__all__ = ["Alignment", "Conformance", "Net", "align", "align_within", "conformance", "to_net"]
