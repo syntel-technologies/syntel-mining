@@ -1,0 +1,113 @@
+name: Release
+
+# A tag is the trigger, and the tag must match the version in `pyproject.toml`. Publishing from
+# a branch would make "what is on PyPI" a question about timing.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: The tag matches the version, and everything passes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.7"
+      - run: uv python install 3.13
+      - id: version
+        name: The tag and the package agree
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          declared="$(uv run python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          exported="$(uv run python -c 'import syntel_mining; print(syntel_mining.__version__)')"
+          echo "tag=$tagged pyproject=$declared __version__=$exported"
+          if [ "$tagged" != "$declared" ] || [ "$tagged" != "$exported" ]; then
+            echo "::error::tag $tagged, pyproject $declared, __version__ $exported — all three must match" >&2
+            exit 1
+          fi
+          echo "version=$tagged" >> "$GITHUB_OUTPUT"
+
+  checks:
+    name: CI
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Build the distributions
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.7"
+      - run: uv python install 3.13
+      - run: uv build
+      - run: uvx twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # A named environment, so the repository can require a reviewer before anything is
+    # published and the approval is recorded against the release rather than a chat message.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/syntel-mining
+    permissions:
+      # Trusted Publishing: PyPI verifies this workflow's OIDC identity instead of a token.
+      # There is no API token to store as a secret, rotate, or leak — the credential is minted
+      # per run and lives for the length of the upload.
+      id-token: write
+      # For the attestations the action generates alongside the upload, so a consumer can verify
+      # that this file, in this repository, produced these bytes.
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          attestations: true
+
+  tag-release:
+    name: Record the release on GitHub
+    needs: [verify, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-dist
+          path: dist/
+      - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "syntel-mining $VERSION" \
+            --notes "Published to PyPI: https://pypi.org/project/syntel-mining/$VERSION/
+
+          Built and uploaded by \`.github/workflows/release.yml\` with PyPI Trusted Publishing,
+          with attestations. No API token exists for this project." \
+            --verify-tag

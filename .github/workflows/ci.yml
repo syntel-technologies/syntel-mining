@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Lint, types and tests (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor and the ceiling of `requires-python`. A library with no dependencies has no
+        # excuse for only being tested on one interpreter, and the ceiling is where a new
+        # release breaks something first.
+        python: ["3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.7"
+          enable-cache: true
+      - run: uv python install ${{ matrix.python }}
+      - run: uv sync --locked --python ${{ matrix.python }}
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run pyright
+      - run: uv run pytest -q
+
+  package:
+    name: The built package is installable and complete
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.7"
+      - run: uv python install 3.13
+      - run: uv build
+      # `twine check` reads the metadata the way PyPI will, so a README that fails to render is
+      # caught here rather than after a version number has been spent.
+      - run: uvx twine check --strict dist/*
+      - name: The wheel carries its licence
+        run: |
+          python -c "
+          import glob, zipfile, sys
+          wheel = sorted(glob.glob('dist/*.whl'))[-1]
+          names = zipfile.ZipFile(wheel).namelist()
+          need = ['dist-info/licenses/LICENSE', 'dist-info/licenses/NOTICE']
+          missing = [n for n in need if not any(x.endswith(n) for x in names)]
+          sys.exit(f'wheel is missing {missing}' if missing else 0)
+          "
+      - name: It installs and imports from the wheel alone
+        run: |
+          uv venv /tmp/probe
+          uv pip install --python /tmp/probe/bin/python dist/*.whl
+          /tmp/probe/bin/python -c "
+          import syntel_mining
+          from syntel_mining import conformance, discover
+          print('version', syntel_mining.__version__)
+          log = {('a', 'b', 'c'): 3, ('a', 'c', 'b'): 2}
+          tree = discover(log, noise=0)
+          assert conformance(tree, log).fitting_traces == 5, 'the installed package does not fit its own log'
+          print(tree, 'ok')
+          "
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7

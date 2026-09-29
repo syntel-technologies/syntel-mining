@@ -4,4 +4,6 @@ __pycache__/
 .ruff_cache/
 .hypothesis/
 .DS_Store
-uv.lock
+dist/
+build/
+*.egg-info/
