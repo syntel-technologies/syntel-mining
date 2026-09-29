@@ -1,0 +1,5 @@
+syntel-mining
+Copyright 2026 Syntel Technologies, Inc.
+
+This product is a clean-room implementation of published process-mining methods. It contains no code
+from pm4py or any other copyleft project.
